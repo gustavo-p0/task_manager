@@ -1,5 +1,11 @@
 import 'package:uuid/uuid.dart';
 
+///Este arquivo define a estrutura de dados da nossa tarefa. A classe Task representa o nosso "modelo" (Model). Ela contém os campos que uma tarefa terá (id, título, etc.) e métodos úteis para conversão de dados:
+
+///toMap(): Converte o objeto Task em um Map, que é o formato que o sqflite usa para inserir dados no banco.
+///fromMap(): Faz o processo inverso, criando um objeto Task a partir de um Map vindo do banco de dados.
+///copyWith(): Um método auxiliar para criar uma cópia de uma tarefa, modificando apenas alguns campos, útil para atualizações.
+
 class Task {
   final String id;
   final String title;

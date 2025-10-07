@@ -2,6 +2,13 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import '../models/task.dart';
 
+
+///Esta é a classe central para a lógica de banco de dados. Ela segue o padrão Singleton, garantindo que tenhamos apenas uma instância da conexão com o banco em todo o app.
+
+///_initDB(): Inicializa o banco de dados, define seu nome e caminho.
+///_createDB(): É chamado na primeira vez que o banco é criado e executa o comando SQL para criar a tabela tasks com suas respectivas colunas.
+///Métodos CRUD: create, read, readAll, update, e delete são os métodos públicos que nossa UI usará para interagir com o banco de dados, abstraindo a complexidade das queries SQL.
+
 class DatabaseService {
   static final DatabaseService instance = DatabaseService._init();
   static Database? _database;

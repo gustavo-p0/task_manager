@@ -2,6 +2,14 @@ import 'package:flutter/material.dart';
 import '../models/task.dart';
 import '../services/database_service.dart';
 
+/// Este widget é a interface do usuário (UI) da nossa aplicação. Ele é um StatefulWidget porque seu conteúdo (a lista de tarefas) precisa mudar dinamicamente.
+
+/// _loadTasks(): Carrega as tarefas do banco de dados usando nosso DatabaseService e atualiza o estado da tela com setState.
+/// _addTask(): Pega o texto do TextField, cria um novo objeto Task e o salva no banco.
+/// _toggleTask() e _deleteTask(): Lidam com as ações de marcar uma tarefa como concluída e de excluí-la, respectivamente.
+/// build(): Constrói a árvore de widgets, que inclui um AppBar, um TextField para adicionar novas tarefas e um ListView.builder para exibir a lista de tarefas de forma eficiente.
+
+
 class TaskListScreen extends StatefulWidget {
   const TaskListScreen({super.key});
 
