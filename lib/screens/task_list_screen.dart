@@ -1,14 +1,9 @@
 import 'package:flutter/material.dart';
 import '../models/task.dart';
+import '../models/category.dart';
 import '../services/database_service.dart';
-
-/// Este widget é a interface do usuário (UI) da nossa aplicação. Ele é um StatefulWidget porque seu conteúdo (a lista de tarefas) precisa mudar dinamicamente.
-
-/// _loadTasks(): Carrega as tarefas do banco de dados usando nosso DatabaseService e atualiza o estado da tela com setState.
-/// _addTask(): Pega o texto do TextField, cria um novo objeto Task e o salva no banco.
-/// _toggleTask() e _deleteTask(): Lidam com as ações de marcar uma tarefa como concluída e de excluí-la, respectivamente.
-/// build(): Constrói a árvore de widgets, que inclui um AppBar, um TextField para adicionar novas tarefas e um ListView.builder para exibir a lista de tarefas de forma eficiente.
-
+import '../widgets/task_card.dart';
+import 'task_form_screen.dart';
 
 class TaskListScreen extends StatefulWidget {
   const TaskListScreen({super.key});
@@ -19,242 +14,396 @@ class TaskListScreen extends StatefulWidget {
 
 class _TaskListScreenState extends State<TaskListScreen> {
   List<Task> _tasks = [];
-  List<Task> _filteredTasks = [];
-  final _titleController = TextEditingController();
-  String _selectedPriority = 'medium';
-  String _selectedFilter = 'todas';
+  String _filter = 'all'; // all, completed, pending
+  String? _categoryFilter = 'other'; // Padrão: Outros, null = sem categoria
+  bool _isLoading = false;
+  bool _orderByDueDate = false;
 
   @override
   void initState() {
     super.initState();
     _loadTasks();
+    _checkOverdueTasks();
   }
 
   Future<void> _loadTasks() async {
-    final tasks = await DatabaseService.instance.readAll();
+    setState(() => _isLoading = true);
+    final tasks = await DatabaseService.instance.readAll(
+      orderByDueDate: _orderByDueDate,
+    );
     setState(() {
       _tasks = tasks;
-      _applyFilter();
+      _isLoading = false;
     });
   }
 
-  void _applyFilter() {
-    setState(() {
-      switch (_selectedFilter) {
-        case 'completas':
-          _filteredTasks = _tasks.where((task) => task.completed).toList();
-          break;
-        case 'pendentes':
-          _filteredTasks = _tasks.where((task) => !task.completed).toList();
-          break;
-        default:
-          _filteredTasks = _tasks;
-      }
-    });
+  Future<void> _checkOverdueTasks() async {
+    final tasks = await DatabaseService.instance.readAll();
+    final overdueTasks = tasks.where((t) => t.isOverdue).toList();
+    
+    if (overdueTasks.isNotEmpty && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.warning, color: Colors.red),
+                SizedBox(width: 8),
+                Text('Tarefas Vencidas'),
+              ],
+            ),
+            content: Text(
+              'Você tem ${overdueTasks.length} tarefa(s) vencida(s):\n\n'
+              '${overdueTasks.take(5).map((t) => '• ${t.title}').join('\n')}'
+              '${overdueTasks.length > 5 ? '\n... e mais ${overdueTasks.length - 5}' : ''}',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      });
+    }
   }
 
-  Future<void> _addTask() async {
-    if (_titleController.text.trim().isEmpty) return;
+  List<Task> get _filteredTasks {
+    var tasks = _tasks;
 
-    final task = Task(
-      title: _titleController.text.trim(),
-      priority: _selectedPriority,
-    );
-    await DatabaseService.instance.create(task);
-    _titleController.clear();
-    _loadTasks();
+    // Filtro por status
+    switch (_filter) {
+      case 'completed':
+        tasks = tasks.where((t) => t.completed).toList();
+        break;
+      case 'pending':
+        tasks = tasks.where((t) => !t.completed).toList();
+        break;
+    }
+
+    // Filtro por categoria
+    if (_categoryFilter == null) {
+      tasks = tasks.where((t) => t.categoryId == null).toList();
+    } else {
+      tasks = tasks.where((t) => t.categoryId == _categoryFilter).toList();
+    }
+
+    return tasks;
   }
 
   Future<void> _toggleTask(Task task) async {
     final updated = task.copyWith(completed: !task.completed);
     await DatabaseService.instance.update(updated);
-    _loadTasks();
+    await _loadTasks();
   }
 
-  Future<void> _deleteTask(String id) async {
-    await DatabaseService.instance.delete(id);
-    _loadTasks();
-  }
+  Future<void> _deleteTask(Task task) async {
+    // Confirmar exclusão
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Confirmar exclusão'),
+        content: Text('Deseja realmente excluir "${task.title}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Excluir'),
+          ),
+        ],
+      ),
+    );
 
-  String _getPriorityText(String priority) {
-    switch (priority) {
-      case 'high':
-        return 'Alta';
-      case 'medium':
-        return 'Média';
-      case 'low':
-        return 'Baixa';
-      default:
-        return 'Média';
+    if (confirmed == true) {
+      await DatabaseService.instance.delete(task.id);
+      await _loadTasks();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Tarefa excluída'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
     }
   }
 
-  Color _getPriorityColor(String priority) {
-    switch (priority) {
-      case 'high':
-        return Colors.red;
-      case 'medium':
-        return Colors.orange;
-      case 'low':
-        return Colors.green;
-      default:
-        return Colors.orange;
+  Future<void> _openTaskForm([Task? task]) async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => TaskFormScreen(task: task),
+      ),
+    );
+
+    if (result == true) {
+      await _loadTasks();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final completedCount = _tasks.where((task) => task.completed).length;
-    final pendingCount = _tasks.where((task) => !task.completed).length;
+    final filteredTasks = _filteredTasks;
+    final stats = _calculateStats();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Minhas Tarefas'),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(40),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  'Total: ${_tasks.length} | Completas: $completedCount | Pendentes: $pendingCount',
-                  style: const TextStyle(fontSize: 14),
-                ),
-              ],
-            ),
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+        elevation: 2,
+        actions: [
+          // Ordenação
+          IconButton(
+            icon: Icon(_orderByDueDate ? Icons.sort_by_alpha : Icons.sort),
+            tooltip: _orderByDueDate ? 'Ordenar por data de criação' : 'Ordenar por data de vencimento',
+            onPressed: () {
+              setState(() {
+                _orderByDueDate = !_orderByDueDate;
+              });
+              _loadTasks();
+            },
           ),
-        ),
-      ),
-      body: Column(
-        children: [
-          // Filtros
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                const Text('Filtrar: '),
-                const SizedBox(width: 8),
-                DropdownButton<String>(
-                  value: _selectedFilter,
-                  onChanged: (String? newValue) {
-                    setState(() {
-                      _selectedFilter = newValue!;
-                      _applyFilter();
-                    });
-                  },
-                  items: const [
-                    DropdownMenuItem(value: 'todas', child: Text('Todas')),
-                    DropdownMenuItem(value: 'pendentes', child: Text('Pendentes')),
-                    DropdownMenuItem(value: 'completas', child: Text('Completas')),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          // Formulário de nova tarefa
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Column(
-              children: [
-                Row(
+          // Filtro de Status
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.filter_list),
+            onSelected: (value) => setState(() => _filter = value),
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'all',
+                child: Row(
                   children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _titleController,
-                        decoration: const InputDecoration(
-                          hintText: 'Nova tarefa...',
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 100,
-                      child: DropdownButtonFormField<String>(
-                        value: _selectedPriority,
-                        decoration: const InputDecoration(
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(horizontal: 8),
-                        ),
-                        onChanged: (String? newValue) {
-                          setState(() {
-                            _selectedPriority = newValue!;
-                          });
-                        },
-                        items: const [
-                          DropdownMenuItem(value: 'low', child: Text('Baixa')),
-                          DropdownMenuItem(value: 'medium', child: Text('Média')),
-                          DropdownMenuItem(value: 'high', child: Text('Alta')),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      onPressed: _addTask,
-                      child: const Text('Adicionar'),
-                    ),
+                    Icon(Icons.list),
+                    SizedBox(width: 8),
+                    Text('Todas'),
                   ],
                 ),
-              ],
-            ),
+              ),
+              const PopupMenuItem(
+                value: 'pending',
+                child: Row(
+                  children: [
+                    Icon(Icons.pending_actions),
+                    SizedBox(width: 8),
+                    Text('Pendentes'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'completed',
+                child: Row(
+                  children: [
+                    Icon(Icons.check_circle),
+                    SizedBox(width: 8),
+                    Text('Concluídas'),
+                  ],
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 16),
-          // Lista de tarefas
-          Expanded(
-            child: ListView.builder(
-              itemCount: _filteredTasks.length,
-              itemBuilder: (context, index) {
-                final task = _filteredTasks[index];
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: ListTile(
-                    leading: Checkbox(
-                      value: task.completed,
-                      onChanged: (_) => _toggleTask(task),
-                    ),
-                    title: Text(
-                      task.title,
-                      style: TextStyle(
-                        decoration: task.completed
-                            ? TextDecoration.lineThrough
-                            : null,
-                      ),
-                    ),
-                    subtitle: Row(
+          // Filtro de Categoria
+          PopupMenuButton<String?>(
+            icon: const Icon(Icons.category),
+            onSelected: (value) => setState(() => _categoryFilter = value),
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: null,
+                child: Row(
+                  children: [
+                    Icon(Icons.category_outlined),
+                    SizedBox(width: 12),
+                    Text('Sem categoria'),
+                  ],
+                ),
+              ),
+              ...Category.defaultCategories.map((cat) => PopupMenuItem(
+                    value: cat.id,
+                    child: Row(
                       children: [
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          width: 16,
+                          height: 16,
                           decoration: BoxDecoration(
-                            color: _getPriorityColor(task.priority).withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: _getPriorityColor(task.priority),
-                              width: 1,
-                            ),
-                          ),
-                          child: Text(
-                            _getPriorityText(task.priority),
-                            style: TextStyle(
-                              color: _getPriorityColor(task.priority),
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
+                            color: cat.color,
+                            shape: BoxShape.circle,
                           ),
                         ),
+                        const SizedBox(width: 12),
+                        Text(cat.name),
                       ],
                     ),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete),
-                      onPressed: () => _deleteTask(task.id),
-                    ),
+                  )),
+            ],
+          ),
+        ],
+      ),
+
+      body: Column(
+        children: [
+          // Card de Estatísticas
+          if (_tasks.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Colors.blue, Colors.blueAccent],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    blurRadius: 8,
+                    offset: const Offset(0, 4),
                   ),
-                );
-              },
+                ],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _buildStatItem(
+                    Icons.list,
+                    'Total',
+                    stats['total'].toString(),
+                  ),
+                  _buildStatItem(
+                    Icons.pending_actions,
+                    'Pendentes',
+                    stats['pending'].toString(),
+                  ),
+                  _buildStatItem(
+                    Icons.check_circle,
+                    'Concluídas',
+                    stats['completed'].toString(),
+                  ),
+                ],
+              ),
             ),
+
+          // Lista de Tarefas
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                    onRefresh: _loadTasks,
+                    child: filteredTasks.isEmpty
+                        ? ListView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            children: [
+                              SizedBox(
+                                height: MediaQuery.of(context).size.height * 0.5,
+                                child: _buildEmptyState(),
+                              ),
+                            ],
+                          )
+                        : ListView.builder(
+                            padding: const EdgeInsets.only(bottom: 80),
+                            itemCount: filteredTasks.length,
+                            itemBuilder: (context, index) {
+                              final task = filteredTasks[index];
+                              return TaskCard(
+                                task: task,
+                                onTap: () => _openTaskForm(task),
+                                onToggle: () => _toggleTask(task),
+                                onDelete: () => _deleteTask(task),
+                              );
+                            },
+                          ),
+                  ),
+          ),
+        ],
+      ),
+
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _openTaskForm(),
+        icon: const Icon(Icons.add),
+        label: const Text('Nova Tarefa'),
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+      ),
+    );
+  }
+
+  Widget _buildStatItem(IconData icon, String label, String value) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: Colors.white, size: 32),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white70,
+            fontSize: 12,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEmptyState() {
+    String message;
+    IconData icon;
+
+    switch (_filter) {
+      case 'completed':
+        message = 'Nenhuma tarefa concluída ainda';
+        icon = Icons.check_circle_outline;
+        break;
+      case 'pending':
+        message = 'Nenhuma tarefa pendente';
+        icon = Icons.pending_actions;
+        break;
+      default:
+        message = 'Nenhuma tarefa cadastrada';
+        icon = Icons.task_alt;
+    }
+
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 100, color: Colors.grey.shade300),
+          const SizedBox(height: 16),
+          Text(
+            message,
+            style: TextStyle(
+              fontSize: 18,
+              color: Colors.grey.shade600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextButton.icon(
+            onPressed: () => _openTaskForm(),
+            icon: const Icon(Icons.add),
+            label: const Text('Criar primeira tarefa'),
           ),
         ],
       ),
     );
+  }
+
+  Map<String, int> _calculateStats() {
+    return {
+      'total': _tasks.length,
+      'completed': _tasks.where((t) => t.completed).length,
+      'pending': _tasks.where((t) => !t.completed).length,
+    };
   }
 }
