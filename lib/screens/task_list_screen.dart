@@ -15,7 +15,7 @@ class TaskListScreen extends StatefulWidget {
 class _TaskListScreenState extends State<TaskListScreen> {
   List<Task> _tasks = [];
   String _filter = 'all'; // all, completed, pending
-  String? _categoryFilter = 'other'; // Padrão: Outros, null = sem categoria
+  String? _categoryFilter; // null = todas, 'no_category' = sem categoria, id = categoria específica
   bool _isLoading = false;
   bool _orderByDueDate = false;
 
@@ -84,11 +84,12 @@ class _TaskListScreenState extends State<TaskListScreen> {
     }
 
     // Filtro por categoria
-    if (_categoryFilter == null) {
+    if (_categoryFilter == 'no_category') {
       tasks = tasks.where((t) => t.categoryId == null).toList();
-    } else {
+    } else if (_categoryFilter != null) {
       tasks = tasks.where((t) => t.categoryId == _categoryFilter).toList();
     }
+    // null = mostra todas as categorias (não filtra)
 
     return tasks;
   }
@@ -215,6 +216,16 @@ class _TaskListScreenState extends State<TaskListScreen> {
             itemBuilder: (context) => [
               const PopupMenuItem(
                 value: null,
+                child: Row(
+                  children: [
+                    Icon(Icons.clear_all),
+                    SizedBox(width: 12),
+                    Text('Todas as categorias'),
+                  ],
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'no_category',
                 child: Row(
                   children: [
                     Icon(Icons.category_outlined),
