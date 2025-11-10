@@ -27,7 +27,7 @@ class DatabaseService {
 
     return await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _createDB,
       onUpgrade: _upgradeDB,
     );
@@ -43,7 +43,13 @@ class DatabaseService {
         priority TEXT NOT NULL,
         createdAt TEXT NOT NULL,
         dueDate TEXT,
-        categoryId TEXT
+        categoryId TEXT,
+        photoPath TEXT,
+        completedAt TEXT,
+        completedBy TEXT,
+        latitude REAL,
+        longitude REAL,
+        locationName TEXT
       )
     ''');
   }
@@ -55,6 +61,15 @@ class DatabaseService {
     if (oldVersion < 3) {
       await db.execute('ALTER TABLE tasks ADD COLUMN categoryId TEXT');
     }
+    if (oldVersion < 4) {
+      await db.execute('ALTER TABLE tasks ADD COLUMN photoPath TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN completedAt TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN completedBy TEXT');
+      await db.execute('ALTER TABLE tasks ADD COLUMN latitude REAL');
+      await db.execute('ALTER TABLE tasks ADD COLUMN longitude REAL');
+      await db.execute('ALTER TABLE tasks ADD COLUMN locationName TEXT');
+    }
+    print('✅ Banco migrado de v$oldVersion para v$newVersion');
   }
 
   Future<Task> create(Task task) async {
@@ -103,5 +118,25 @@ class DatabaseService {
       where: 'id = ?',
       whereArgs: [id],
     );
+  }
+
+  // Método especial: buscar tarefas por proximidade
+  Future<List<Task>> getTasksNearLocation({
+    required double latitude,
+    required double longitude,
+    double radiusInMeters = 1000,
+  }) async {
+    final allTasks = await readAll();
+
+    return allTasks.where((task) {
+      if (!task.hasLocation) return false;
+
+      // Cálculo de distância usando fórmula de Haversine (simplificada)
+      final latDiff = (task.latitude! - latitude).abs();
+      final lonDiff = (task.longitude! - longitude).abs();
+      final distance = ((latDiff * 111000) + (lonDiff * 111000)) / 2;
+
+      return distance <= radiusInMeters;
+    }).toList();
   }
 }

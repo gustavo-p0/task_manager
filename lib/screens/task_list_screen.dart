@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import '../models/task.dart';
 import '../models/category.dart';
 import '../services/database_service.dart';
+import '../services/sensor_service.dart';
+import '../services/location_service.dart';
+import '../services/camera_service.dart';
 import '../widgets/task_card.dart';
 import 'task_form_screen.dart';
 
@@ -15,7 +18,7 @@ class TaskListScreen extends StatefulWidget {
 class _TaskListScreenState extends State<TaskListScreen> {
   List<Task> _tasks = [];
   String _filter = 'all'; // all, completed, pending
-  String? _categoryFilter; // null = todas, 'no_category' = sem categoria, id = categoria específica
+  String? _categoryFilter = 'all_categories'; // 'all_categories' = todas, 'no_category' = sem categoria, id = categoria específica
   bool _isLoading = false;
   bool _orderByDueDate = false;
 
@@ -24,6 +27,117 @@ class _TaskListScreenState extends State<TaskListScreen> {
     super.initState();
     _loadTasks();
     _checkOverdueTasks();
+    _setupShakeDetection();
+  }
+
+  @override
+  void dispose() {
+    SensorService.instance.stop();
+    super.dispose();
+  }
+
+  // SHAKE DETECTION
+  void _setupShakeDetection() {
+    SensorService.instance.startShakeDetection(() {
+      _showShakeDialog();
+    });
+  }
+
+  void _showShakeDialog() {
+    final pendingTasks = _tasks.where((t) => !t.completed).toList();
+
+    if (pendingTasks.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🎉 Nenhuma tarefa pendente!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+      return;
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: const [
+            Icon(Icons.vibration, color: Colors.blue),
+            SizedBox(width: 8),
+            Expanded(child: Text('Shake detectado!')),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Selecione uma tarefa para completar:'),
+            const SizedBox(height: 16),
+            ...pendingTasks.take(3).map((task) => ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                task.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.check_circle, color: Colors.green),
+                onPressed: () => _completeTaskByShake(task),
+              ),
+            )),
+            if (pendingTasks.length > 3)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  '+ ${pendingTasks.length - 3} outras',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey[600],
+                  ),
+                ),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _completeTaskByShake(Task task) async {
+    try {
+      final updated = task.copyWith(
+        completed: true,
+        completedAt: DateTime.now(),
+        completedBy: 'shake',
+      );
+
+      await DatabaseService.instance.update(updated);
+      Navigator.pop(context);
+      await _loadTasks();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ "${task.title}" completa via shake!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      Navigator.pop(context);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _loadTasks() async {
@@ -81,21 +195,64 @@ class _TaskListScreenState extends State<TaskListScreen> {
       case 'pending':
         tasks = tasks.where((t) => !t.completed).toList();
         break;
+      case 'nearby':
+        // Filtro de proximidade é aplicado separadamente
+        break;
     }
 
     // Filtro por categoria
     if (_categoryFilter == 'no_category') {
       tasks = tasks.where((t) => t.categoryId == null).toList();
-    } else if (_categoryFilter != null) {
+    } else if (_categoryFilter != null && _categoryFilter != 'all_categories') {
       tasks = tasks.where((t) => t.categoryId == _categoryFilter).toList();
     }
-    // null = mostra todas as categorias (não filtra)
+    // null ou 'all_categories' = mostra todas as categorias (não filtra)
 
     return tasks;
   }
 
+  Future<void> _filterByNearby() async {
+    final position = await LocationService.instance.getCurrentLocation();
+
+    if (position == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ Não foi possível obter localização'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
+
+    final nearbyTasks = await DatabaseService.instance.getTasksNearLocation(
+      latitude: position.latitude,
+      longitude: position.longitude,
+      radiusInMeters: 1000,
+    );
+
+    setState(() {
+      _tasks = nearbyTasks;
+      _filter = 'nearby';
+    });
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('📍 ${nearbyTasks.length} tarefa(s) próxima(s)'),
+          backgroundColor: Colors.blue,
+        ),
+      );
+    }
+  }
+
   Future<void> _toggleTask(Task task) async {
-    final updated = task.copyWith(completed: !task.completed);
+    final updated = task.copyWith(
+      completed: !task.completed,
+      completedAt: !task.completed ? DateTime.now() : null,
+      completedBy: !task.completed ? 'manual' : null,
+    );
     await DatabaseService.instance.update(updated);
     await _loadTasks();
   }
@@ -122,16 +279,31 @@ class _TaskListScreenState extends State<TaskListScreen> {
     );
 
     if (confirmed == true) {
-      await DatabaseService.instance.delete(task.id);
-      await _loadTasks();
+      try {
+        if (task.hasPhoto) {
+          await CameraService.instance.deletePhoto(task.photoPath!);
+        }
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Tarefa excluída'),
-            duration: Duration(seconds: 2),
-          ),
-        );
+        await DatabaseService.instance.delete(task.id);
+        await _loadTasks();
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('🗑️ Tarefa deletada'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Erro: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
@@ -175,35 +347,90 @@ class _TaskListScreenState extends State<TaskListScreen> {
           // Filtro de Status
           PopupMenuButton<String>(
             icon: const Icon(Icons.filter_list),
-            onSelected: (value) => setState(() => _filter = value),
+            onSelected: (value) {
+              if (value == 'nearby') {
+                _filterByNearby();
+              } else {
+                setState(() {
+                  _filter = value;
+                  if (value != 'nearby') _loadTasks();
+                });
+              }
+            },
             itemBuilder: (context) => [
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'all',
                 child: Row(
                   children: [
-                    Icon(Icons.list),
-                    SizedBox(width: 8),
-                    Text('Todas'),
+                    Icon(
+                      Icons.list,
+                      color: _filter == 'all' ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Todas',
+                      style: TextStyle(
+                        fontWeight: _filter == 'all' ? FontWeight.bold : FontWeight.normal,
+                        color: _filter == 'all' ? Colors.blue : null,
+                      ),
+                    ),
                   ],
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'pending',
                 child: Row(
                   children: [
-                    Icon(Icons.pending_actions),
-                    SizedBox(width: 8),
-                    Text('Pendentes'),
+                    Icon(
+                      Icons.pending_actions,
+                      color: _filter == 'pending' ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Pendentes',
+                      style: TextStyle(
+                        fontWeight: _filter == 'pending' ? FontWeight.bold : FontWeight.normal,
+                        color: _filter == 'pending' ? Colors.blue : null,
+                      ),
+                    ),
                   ],
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'completed',
                 child: Row(
                   children: [
-                    Icon(Icons.check_circle),
-                    SizedBox(width: 8),
-                    Text('Concluídas'),
+                    Icon(
+                      Icons.check_circle,
+                      color: _filter == 'completed' ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Concluídas',
+                      style: TextStyle(
+                        fontWeight: _filter == 'completed' ? FontWeight.bold : FontWeight.normal,
+                        color: _filter == 'completed' ? Colors.blue : null,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'nearby',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.near_me,
+                      color: _filter == 'nearby' ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Próximas',
+                      style: TextStyle(
+                        fontWeight: _filter == 'nearby' ? FontWeight.bold : FontWeight.normal,
+                        color: _filter == 'nearby' ? Colors.blue : null,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -214,23 +441,41 @@ class _TaskListScreenState extends State<TaskListScreen> {
             icon: const Icon(Icons.category),
             onSelected: (value) => setState(() => _categoryFilter = value),
             itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: null,
+              PopupMenuItem(
+                value: 'all_categories',
                 child: Row(
                   children: [
-                    Icon(Icons.clear_all),
-                    SizedBox(width: 12),
-                    Text('Todas as categorias'),
+                    Icon(
+                      Icons.clear_all,
+                      color: (_categoryFilter == null || _categoryFilter == 'all_categories') ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'Todas as categorias',
+                      style: TextStyle(
+                        fontWeight: (_categoryFilter == null || _categoryFilter == 'all_categories') ? FontWeight.bold : FontWeight.normal,
+                        color: (_categoryFilter == null || _categoryFilter == 'all_categories') ? Colors.blue : null,
+                      ),
+                    ),
                   ],
                 ),
               ),
-              const PopupMenuItem(
+              PopupMenuItem(
                 value: 'no_category',
                 child: Row(
                   children: [
-                    Icon(Icons.category_outlined),
-                    SizedBox(width: 12),
-                    Text('Sem categoria'),
+                    Icon(
+                      Icons.category_outlined,
+                      color: _categoryFilter == 'no_category' ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      'Sem categoria',
+                      style: TextStyle(
+                        fontWeight: _categoryFilter == 'no_category' ? FontWeight.bold : FontWeight.normal,
+                        color: _categoryFilter == 'no_category' ? Colors.blue : null,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -242,12 +487,21 @@ class _TaskListScreenState extends State<TaskListScreen> {
                           width: 16,
                           height: 16,
                           decoration: BoxDecoration(
-                            color: cat.color,
+                            color: _categoryFilter == cat.id ? Colors.blue : cat.color,
                             shape: BoxShape.circle,
+                            border: _categoryFilter == cat.id
+                                ? Border.all(color: Colors.blue.shade700, width: 2)
+                                : null,
                           ),
                         ),
                         const SizedBox(width: 12),
-                        Text(cat.name),
+                        Text(
+                          cat.name,
+                          style: TextStyle(
+                            fontWeight: _categoryFilter == cat.id ? FontWeight.bold : FontWeight.normal,
+                            color: _categoryFilter == cat.id ? Colors.blue : null,
+                          ),
+                        ),
                       ],
                     ),
                   )),
@@ -371,19 +625,40 @@ class _TaskListScreenState extends State<TaskListScreen> {
   Widget _buildEmptyState() {
     String message;
     IconData icon;
+    final hasCategoryFilter = _categoryFilter != null && _categoryFilter != 'all_categories';
+    bool hasFilters = _filter != 'all' || hasCategoryFilter;
 
-    switch (_filter) {
-      case 'completed':
-        message = 'Nenhuma tarefa concluída ainda';
+    // Mensagem baseada nos filtros ativos
+    if (hasFilters) {
+      final List<String> filterParts = [];
+      icon = Icons.filter_list; // Ícone padrão quando há filtros
+      
+      if (_filter == 'completed') {
+        filterParts.add('concluídas');
         icon = Icons.check_circle_outline;
-        break;
-      case 'pending':
-        message = 'Nenhuma tarefa pendente';
+      } else if (_filter == 'pending') {
+        filterParts.add('pendentes');
         icon = Icons.pending_actions;
-        break;
-      default:
-        message = 'Nenhuma tarefa cadastrada';
-        icon = Icons.task_alt;
+      } else if (_filter == 'nearby') {
+        filterParts.add('próximas');
+        icon = Icons.near_me;
+      }
+      
+      if (_categoryFilter == 'no_category') {
+        filterParts.add('sem categoria');
+        if (_filter == 'all') icon = Icons.category_outlined;
+      } else if (hasCategoryFilter && _categoryFilter != 'all_categories') {
+        final category = Category.getById(_categoryFilter);
+        if (category != null) {
+          filterParts.add('da categoria "${category.name}"');
+          if (_filter == 'all') icon = Icons.category;
+        }
+      }
+      
+      message = 'Nenhuma tarefa ${filterParts.join(' e ')}';
+    } else {
+      message = 'Nenhuma tarefa cadastrada';
+      icon = Icons.task_alt;
     }
 
     return Center(
@@ -398,6 +673,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
               fontSize: 18,
               color: Colors.grey.shade600,
             ),
+            textAlign: TextAlign.center,
           ),
           const SizedBox(height: 8),
           TextButton.icon(
@@ -411,10 +687,16 @@ class _TaskListScreenState extends State<TaskListScreen> {
   }
 
   Map<String, int> _calculateStats() {
+    final filteredTasks = _filteredTasks;
+    // Mostra estatísticas das tarefas filtradas quando há filtros ativos
+    final hasCategoryFilter = _categoryFilter != null && _categoryFilter != 'all_categories';
+    final showFilteredStats = _filter != 'all' || hasCategoryFilter;
+    final tasksToCount = showFilteredStats ? filteredTasks : _tasks;
+    
     return {
-      'total': _tasks.length,
-      'completed': _tasks.where((t) => t.completed).length,
-      'pending': _tasks.where((t) => !t.completed).length,
+      'total': tasksToCount.length,
+      'completed': tasksToCount.where((t) => t.completed).length,
+      'pending': tasksToCount.where((t) => !t.completed).length,
     };
   }
 }
