@@ -28,6 +28,11 @@ class Task {
   final double? longitude;
   final String? locationName;
 
+  // SYNC
+  final String? serverId;
+  final int updatedAt;
+  final bool synced;
+
   Task({
     String? id,
     required this.title,
@@ -43,8 +48,12 @@ class Task {
     this.latitude,
     this.longitude,
     this.locationName,
-  })  : id = id ?? const Uuid().v4(),
-        createdAt = createdAt ?? DateTime.now();
+    this.serverId,
+    int? updatedAt,
+    this.synced = false,
+  }) : id = id ?? const Uuid().v4(),
+       createdAt = createdAt ?? DateTime.now(),
+       updatedAt = updatedAt ?? DateTime.now().millisecondsSinceEpoch;
 
   // Getters auxiliares
   bool get hasPhoto => photoPath != null && photoPath!.isNotEmpty;
@@ -67,6 +76,9 @@ class Task {
       'latitude': latitude,
       'longitude': longitude,
       'locationName': locationName,
+      'server_id': serverId,
+      'updated_at': updatedAt,
+      'synced': synced ? 1 : 0,
     };
   }
 
@@ -88,6 +100,10 @@ class Task {
       latitude: map['latitude'] as double?,
       longitude: map['longitude'] as double?,
       locationName: map['locationName'] as String?,
+      serverId: map['server_id'] as String?,
+      updatedAt:
+          map['updated_at'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+      synced: (map['synced'] as int? ?? 0) == 1,
     );
   }
 
@@ -104,6 +120,9 @@ class Task {
     double? latitude,
     double? longitude,
     String? locationName,
+    String? serverId,
+    int? updatedAt,
+    bool? synced,
   }) {
     return Task(
       id: id,
@@ -120,6 +139,9 @@ class Task {
       latitude: latitude ?? this.latitude,
       longitude: longitude ?? this.longitude,
       locationName: locationName ?? this.locationName,
+      serverId: serverId ?? this.serverId,
+      updatedAt: updatedAt ?? this.updatedAt,
+      synced: synced ?? this.synced,
     );
   }
 

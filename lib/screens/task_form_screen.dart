@@ -6,6 +6,7 @@ import '../models/category.dart';
 import '../services/database_service.dart';
 import '../services/camera_service.dart';
 import '../services/location_service.dart';
+import '../services/sync_service.dart';
 import '../widgets/location_picker.dart';
 
 class TaskFormScreen extends StatefulWidget {
@@ -72,6 +73,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
     try {
       if (widget.task == null) {
         // Criar nova tarefa
+        final now = DateTime.now().millisecondsSinceEpoch;
         final newTask = Task(
           title: _titleController.text.trim(),
           description: _descriptionController.text.trim(),
@@ -83,8 +85,16 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
           latitude: _latitude,
           longitude: _longitude,
           locationName: _locationName,
+          updatedAt: now,
+          synced: false,
         );
         await DatabaseService.instance.create(newTask);
+
+        // Adicionar à fila de sincronização
+        await SyncService().queueTaskOperation(
+          task: newTask,
+          operation: 'CREATE',
+        );
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -108,8 +118,16 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
           latitude: _latitude,
           longitude: _longitude,
           locationName: _locationName,
+          updatedAt: DateTime.now().millisecondsSinceEpoch,
+          synced: false,
         );
         await DatabaseService.instance.update(updatedTask);
+
+        // Adicionar à fila de sincronização
+        await SyncService().queueTaskOperation(
+          task: updatedTask,
+          operation: 'UPDATE',
+        );
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -214,23 +232,25 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                           value: null,
                           child: Text('Sem categoria'),
                         ),
-                        ...Category.defaultCategories.map((cat) => DropdownMenuItem(
-                              value: cat.id,
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 16,
-                                    height: 16,
-                                    decoration: BoxDecoration(
-                                      color: cat.color,
-                                      shape: BoxShape.circle,
-                                    ),
+                        ...Category.defaultCategories.map(
+                          (cat) => DropdownMenuItem(
+                            value: cat.id,
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 16,
+                                  height: 16,
+                                  decoration: BoxDecoration(
+                                    color: cat.color,
+                                    shape: BoxShape.circle,
                                   ),
-                                  const SizedBox(width: 12),
-                                  Text(cat.name),
-                                ],
-                              ),
-                            )),
+                                ),
+                                const SizedBox(width: 12),
+                                Text(cat.name),
+                              ],
+                            ),
+                          ),
+                        ),
                       ],
                       onChanged: (value) {
                         setState(() => _categoryId = value);
@@ -321,7 +341,9 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                             context: context,
                             initialDate: _dueDate ?? DateTime.now(),
                             firstDate: DateTime.now(),
-                            lastDate: DateTime.now().add(const Duration(days: 365 * 2)),
+                            lastDate: DateTime.now().add(
+                              const Duration(days: 365 * 2),
+                            ),
                             locale: const Locale('pt', 'BR'),
                           );
                           if (picked != null) {
@@ -338,7 +360,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                       child: SwitchListTile(
                         title: const Text('Tarefa Completa'),
                         subtitle: Text(
-                          _completed 
+                          _completed
                               ? 'Esta tarefa está marcada como concluída'
                               : 'Esta tarefa ainda não foi concluída',
                         ),
@@ -347,7 +369,9 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                           setState(() => _completed = value);
                         },
                         secondary: Icon(
-                          _completed ? Icons.check_circle : Icons.radio_button_unchecked,
+                          _completed
+                              ? Icons.check_circle
+                              : Icons.radio_button_unchecked,
                           color: _completed ? Colors.green : Colors.grey,
                         ),
                       ),
@@ -449,7 +473,10 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                     if (_latitude != null && _longitude != null)
                       Card(
                         child: ListTile(
-                          leading: const Icon(Icons.location_on, color: Colors.blue),
+                          leading: const Icon(
+                            Icons.location_on,
+                            color: Colors.blue,
+                          ),
                           title: Text(_locationName ?? 'Localização salva'),
                           subtitle: Text(
                             LocationService.instance.formatCoordinates(
@@ -479,7 +506,9 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
                     ElevatedButton.icon(
                       onPressed: _saveTask,
                       icon: const Icon(Icons.save),
-                      label: Text(isEditing ? 'Atualizar Tarefa' : 'Criar Tarefa'),
+                      label: Text(
+                        isEditing ? 'Atualizar Tarefa' : 'Criar Tarefa',
+                      ),
                       style: ElevatedButton.styleFrom(
                         padding: const EdgeInsets.all(16),
                         backgroundColor: Colors.blue,
@@ -534,9 +563,9 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
 
   void _removePhoto() {
     setState(() => _photoPath = null);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('🗑️ Foto removida')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('🗑️ Foto removida')));
   }
 
   void _viewPhoto() {
@@ -547,10 +576,7 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
       MaterialPageRoute(
         builder: (context) => Scaffold(
           backgroundColor: Colors.black,
-          appBar: AppBar(
-            backgroundColor: Colors.transparent,
-            elevation: 0,
-          ),
+          appBar: AppBar(backgroundColor: Colors.transparent, elevation: 0),
           body: Center(
             child: InteractiveViewer(
               child: Image.file(File(_photoPath!), fit: BoxFit.contain),
@@ -595,8 +621,8 @@ class _TaskFormScreenState extends State<TaskFormScreen> {
       _longitude = null;
       _locationName = null;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('📍 Localização removida')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('📍 Localização removida')));
   }
 }

@@ -5,6 +5,8 @@ import '../services/database_service.dart';
 import '../services/sensor_service.dart';
 import '../services/location_service.dart';
 import '../services/camera_service.dart';
+import '../services/connectivity_service.dart';
+import '../services/sync_service.dart';
 import '../widgets/task_card.dart';
 import 'task_form_screen.dart';
 
@@ -18,16 +20,54 @@ class TaskListScreen extends StatefulWidget {
 class _TaskListScreenState extends State<TaskListScreen> {
   List<Task> _tasks = [];
   String _filter = 'all'; // all, completed, pending
-  String? _categoryFilter = 'all_categories'; // 'all_categories' = todas, 'no_category' = sem categoria, id = categoria específica
+  String? _categoryFilter =
+      'all_categories'; // 'all_categories' = todas, 'no_category' = sem categoria, id = categoria específica
   bool _isLoading = false;
   bool _orderByDueDate = false;
+
+  ConnectivityStatus _connectivityStatus = ConnectivityStatus.offline;
+  int _pendingSyncCount = 0;
+  final ConnectivityService _connectivity = ConnectivityService();
+  final SyncService _sync = SyncService();
 
   @override
   void initState() {
     super.initState();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    // Inicializar serviços
+    await _connectivity.initialize();
+    _sync.initialize();
+
+    // Escutar mudanças de conectividade
+    _connectivity.statusStream.listen((status) async {
+      setState(() {
+        _connectivityStatus = status;
+      });
+      if (status == ConnectivityStatus.online) {
+        await _sync.syncQueue();
+        await _sync.syncFromServer();
+        await _loadTasks();
+        await _updatePendingSyncCount();
+      }
+    });
+
+    // Carregar status inicial
+    _connectivityStatus = _connectivity.currentStatus;
+
     _loadTasks();
     _checkOverdueTasks();
     _setupShakeDetection();
+    await _updatePendingSyncCount();
+  }
+
+  Future<void> _updatePendingSyncCount() async {
+    final unsynced = await DatabaseService.instance.getUnsyncedTasks();
+    setState(() {
+      _pendingSyncCount = unsynced.length;
+    });
   }
 
   @override
@@ -72,27 +112,28 @@ class _TaskListScreenState extends State<TaskListScreen> {
           children: [
             const Text('Selecione uma tarefa para completar:'),
             const SizedBox(height: 16),
-            ...pendingTasks.take(3).map((task) => ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(
-                task.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              trailing: IconButton(
-                icon: const Icon(Icons.check_circle, color: Colors.green),
-                onPressed: () => _completeTaskByShake(task),
-              ),
-            )),
+            ...pendingTasks
+                .take(3)
+                .map(
+                  (task) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      task.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.check_circle, color: Colors.green),
+                      onPressed: () => _completeTaskByShake(task),
+                    ),
+                  ),
+                ),
             if (pendingTasks.length > 3)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
                   '+ ${pendingTasks.length - 3} outras',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey[600],
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey[600]),
                 ),
               ),
           ],
@@ -113,11 +154,18 @@ class _TaskListScreenState extends State<TaskListScreen> {
         completed: true,
         completedAt: DateTime.now(),
         completedBy: 'shake',
+        updatedAt: DateTime.now().millisecondsSinceEpoch,
+        synced: false,
       );
 
       await DatabaseService.instance.update(updated);
+
+      // Adicionar à fila de sincronização
+      await _sync.queueTaskOperation(task: updated, operation: 'UPDATE');
+
       Navigator.pop(context);
       await _loadTasks();
+      await _updatePendingSyncCount();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -131,10 +179,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
       Navigator.pop(context);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Erro: $e'),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Erro: $e'), backgroundColor: Colors.red),
         );
       }
     }
@@ -154,7 +199,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
   Future<void> _checkOverdueTasks() async {
     final tasks = await DatabaseService.instance.readAll();
     final overdueTasks = tasks.where((t) => t.isOverdue).toList();
-    
+
     if (overdueTasks.isNotEmpty && mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         showDialog(
@@ -252,9 +297,16 @@ class _TaskListScreenState extends State<TaskListScreen> {
       completed: !task.completed,
       completedAt: !task.completed ? DateTime.now() : null,
       completedBy: !task.completed ? 'manual' : null,
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+      synced: false,
     );
     await DatabaseService.instance.update(updated);
+
+    // Adicionar à fila de sincronização
+    await _sync.queueTaskOperation(task: updated, operation: 'UPDATE');
+
     await _loadTasks();
+    await _updatePendingSyncCount();
   }
 
   Future<void> _deleteTask(Task task) async {
@@ -285,7 +337,14 @@ class _TaskListScreenState extends State<TaskListScreen> {
         }
 
         await DatabaseService.instance.delete(task.id);
+
+        // Adicionar à fila de sincronização (se já estava sincronizado)
+        if (task.synced && task.serverId != null) {
+          await _sync.queueTaskOperation(task: task, operation: 'DELETE');
+        }
+
         await _loadTasks();
+        await _updatePendingSyncCount();
 
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -298,10 +357,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Erro: $e'),
-              backgroundColor: Colors.red,
-            ),
+            SnackBar(content: Text('Erro: $e'), backgroundColor: Colors.red),
           );
         }
       }
@@ -311,13 +367,12 @@ class _TaskListScreenState extends State<TaskListScreen> {
   Future<void> _openTaskForm([Task? task]) async {
     final result = await Navigator.push(
       context,
-      MaterialPageRoute(
-        builder: (context) => TaskFormScreen(task: task),
-      ),
+      MaterialPageRoute(builder: (context) => TaskFormScreen(task: task)),
     );
 
     if (result == true) {
       await _loadTasks();
+      await _updatePendingSyncCount();
     }
   }
 
@@ -333,10 +388,47 @@ class _TaskListScreenState extends State<TaskListScreen> {
         foregroundColor: Colors.white,
         elevation: 2,
         actions: [
+          // Indicador de conectividade
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _connectivityStatus == ConnectivityStatus.online
+                      ? Icons.cloud_done
+                      : Icons.cloud_off,
+                  color: _connectivityStatus == ConnectivityStatus.online
+                      ? Colors.green
+                      : Colors.orange,
+                ),
+                if (_pendingSyncCount > 0) ...[
+                  const SizedBox(width: 4),
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: const BoxDecoration(
+                      color: Colors.red,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      '$_pendingSyncCount',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
           // Ordenação
           IconButton(
             icon: Icon(_orderByDueDate ? Icons.sort_by_alpha : Icons.sort),
-            tooltip: _orderByDueDate ? 'Ordenar por data de criação' : 'Ordenar por data de vencimento',
+            tooltip: _orderByDueDate
+                ? 'Ordenar por data de criação'
+                : 'Ordenar por data de vencimento',
             onPressed: () {
               setState(() {
                 _orderByDueDate = !_orderByDueDate;
@@ -370,7 +462,9 @@ class _TaskListScreenState extends State<TaskListScreen> {
                     Text(
                       'Todas',
                       style: TextStyle(
-                        fontWeight: _filter == 'all' ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: _filter == 'all'
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                         color: _filter == 'all' ? Colors.blue : null,
                       ),
                     ),
@@ -389,7 +483,9 @@ class _TaskListScreenState extends State<TaskListScreen> {
                     Text(
                       'Pendentes',
                       style: TextStyle(
-                        fontWeight: _filter == 'pending' ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: _filter == 'pending'
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                         color: _filter == 'pending' ? Colors.blue : null,
                       ),
                     ),
@@ -408,7 +504,9 @@ class _TaskListScreenState extends State<TaskListScreen> {
                     Text(
                       'Concluídas',
                       style: TextStyle(
-                        fontWeight: _filter == 'completed' ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: _filter == 'completed'
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                         color: _filter == 'completed' ? Colors.blue : null,
                       ),
                     ),
@@ -427,7 +525,9 @@ class _TaskListScreenState extends State<TaskListScreen> {
                     Text(
                       'Próximas',
                       style: TextStyle(
-                        fontWeight: _filter == 'nearby' ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: _filter == 'nearby'
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                         color: _filter == 'nearby' ? Colors.blue : null,
                       ),
                     ),
@@ -447,14 +547,26 @@ class _TaskListScreenState extends State<TaskListScreen> {
                   children: [
                     Icon(
                       Icons.clear_all,
-                      color: (_categoryFilter == null || _categoryFilter == 'all_categories') ? Colors.blue : Colors.grey,
+                      color:
+                          (_categoryFilter == null ||
+                              _categoryFilter == 'all_categories')
+                          ? Colors.blue
+                          : Colors.grey,
                     ),
                     const SizedBox(width: 12),
                     Text(
                       'Todas as categorias',
                       style: TextStyle(
-                        fontWeight: (_categoryFilter == null || _categoryFilter == 'all_categories') ? FontWeight.bold : FontWeight.normal,
-                        color: (_categoryFilter == null || _categoryFilter == 'all_categories') ? Colors.blue : null,
+                        fontWeight:
+                            (_categoryFilter == null ||
+                                _categoryFilter == 'all_categories')
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        color:
+                            (_categoryFilter == null ||
+                                _categoryFilter == 'all_categories')
+                            ? Colors.blue
+                            : null,
                       ),
                     ),
                   ],
@@ -466,45 +578,60 @@ class _TaskListScreenState extends State<TaskListScreen> {
                   children: [
                     Icon(
                       Icons.category_outlined,
-                      color: _categoryFilter == 'no_category' ? Colors.blue : Colors.grey,
+                      color: _categoryFilter == 'no_category'
+                          ? Colors.blue
+                          : Colors.grey,
                     ),
                     const SizedBox(width: 12),
                     Text(
                       'Sem categoria',
                       style: TextStyle(
-                        fontWeight: _categoryFilter == 'no_category' ? FontWeight.bold : FontWeight.normal,
-                        color: _categoryFilter == 'no_category' ? Colors.blue : null,
+                        fontWeight: _categoryFilter == 'no_category'
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        color: _categoryFilter == 'no_category'
+                            ? Colors.blue
+                            : null,
                       ),
                     ),
                   ],
                 ),
               ),
-              ...Category.defaultCategories.map((cat) => PopupMenuItem(
-                    value: cat.id,
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 16,
-                          height: 16,
-                          decoration: BoxDecoration(
-                            color: _categoryFilter == cat.id ? Colors.blue : cat.color,
-                            shape: BoxShape.circle,
-                            border: _categoryFilter == cat.id
-                                ? Border.all(color: Colors.blue.shade700, width: 2)
-                                : null,
-                          ),
+              ...Category.defaultCategories.map(
+                (cat) => PopupMenuItem(
+                  value: cat.id,
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 16,
+                        height: 16,
+                        decoration: BoxDecoration(
+                          color: _categoryFilter == cat.id
+                              ? Colors.blue
+                              : cat.color,
+                          shape: BoxShape.circle,
+                          border: _categoryFilter == cat.id
+                              ? Border.all(
+                                  color: Colors.blue.shade700,
+                                  width: 2,
+                                )
+                              : null,
                         ),
-                        const SizedBox(width: 12),
-                        Text(
-                          cat.name,
-                          style: TextStyle(
-                            fontWeight: _categoryFilter == cat.id ? FontWeight.bold : FontWeight.normal,
-                            color: _categoryFilter == cat.id ? Colors.blue : null,
-                          ),
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        cat.name,
+                        style: TextStyle(
+                          fontWeight: _categoryFilter == cat.id
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                          color: _categoryFilter == cat.id ? Colors.blue : null,
                         ),
-                      ],
-                    ),
-                  )),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         ],
@@ -525,10 +652,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
                 ),
                 borderRadius: BorderRadius.circular(12),
                 boxShadow: [
-                  BoxShadow(
-                    blurRadius: 8,
-                    offset: const Offset(0, 4),
-                  ),
+                  BoxShadow(blurRadius: 8, offset: const Offset(0, 4)),
                 ],
               ),
               child: Row(
@@ -564,7 +688,8 @@ class _TaskListScreenState extends State<TaskListScreen> {
                             physics: const AlwaysScrollableScrollPhysics(),
                             children: [
                               SizedBox(
-                                height: MediaQuery.of(context).size.height * 0.5,
+                                height:
+                                    MediaQuery.of(context).size.height * 0.5,
                                 child: _buildEmptyState(),
                               ),
                             ],
@@ -613,10 +738,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
         ),
         Text(
           label,
-          style: const TextStyle(
-            color: Colors.white70,
-            fontSize: 12,
-          ),
+          style: const TextStyle(color: Colors.white70, fontSize: 12),
         ),
       ],
     );
@@ -625,14 +747,15 @@ class _TaskListScreenState extends State<TaskListScreen> {
   Widget _buildEmptyState() {
     String message;
     IconData icon;
-    final hasCategoryFilter = _categoryFilter != null && _categoryFilter != 'all_categories';
+    final hasCategoryFilter =
+        _categoryFilter != null && _categoryFilter != 'all_categories';
     bool hasFilters = _filter != 'all' || hasCategoryFilter;
 
     // Mensagem baseada nos filtros ativos
     if (hasFilters) {
       final List<String> filterParts = [];
       icon = Icons.filter_list; // Ícone padrão quando há filtros
-      
+
       if (_filter == 'completed') {
         filterParts.add('concluídas');
         icon = Icons.check_circle_outline;
@@ -643,7 +766,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
         filterParts.add('próximas');
         icon = Icons.near_me;
       }
-      
+
       if (_categoryFilter == 'no_category') {
         filterParts.add('sem categoria');
         if (_filter == 'all') icon = Icons.category_outlined;
@@ -654,7 +777,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
           if (_filter == 'all') icon = Icons.category;
         }
       }
-      
+
       message = 'Nenhuma tarefa ${filterParts.join(' e ')}';
     } else {
       message = 'Nenhuma tarefa cadastrada';
@@ -669,10 +792,7 @@ class _TaskListScreenState extends State<TaskListScreen> {
           const SizedBox(height: 16),
           Text(
             message,
-            style: TextStyle(
-              fontSize: 18,
-              color: Colors.grey.shade600,
-            ),
+            style: TextStyle(fontSize: 18, color: Colors.grey.shade600),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 8),
@@ -689,10 +809,11 @@ class _TaskListScreenState extends State<TaskListScreen> {
   Map<String, int> _calculateStats() {
     final filteredTasks = _filteredTasks;
     // Mostra estatísticas das tarefas filtradas quando há filtros ativos
-    final hasCategoryFilter = _categoryFilter != null && _categoryFilter != 'all_categories';
+    final hasCategoryFilter =
+        _categoryFilter != null && _categoryFilter != 'all_categories';
     final showFilteredStats = _filter != 'all' || hasCategoryFilter;
     final tasksToCount = showFilteredStats ? filteredTasks : _tasks;
-    
+
     return {
       'total': tasksToCount.length,
       'completed': tasksToCount.where((t) => t.completed).length,
